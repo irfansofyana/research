@@ -1,0 +1,10 @@
+fastmcp
+fastapi
+uvicorn
+pyjwt
+httpx
+python-dotenv
+jinja2
+authlib
+itsdangerous
+starlette
