@@ -102,6 +102,9 @@ JWT_SECRET=your-random-jwt-secret-here
 
 # Allow insecure HTTP for local development
 OAUTHLIB_INSECURE_TRANSPORT=1
+
+# Graceful shutdown timeout in seconds (default: 60)
+SHUTDOWN_TIMEOUT=60
 ```
 
 **⚠️ Security Note:** Never commit your `.env` file with real credentials to version control!
@@ -202,6 +205,26 @@ Once authenticated and preferences are set:
 > Use the get_email tool to show my email
 > Use the get_name tool to show my name
 ```
+
+### Graceful Shutdown
+
+The server implements graceful shutdown with a configurable timeout:
+
+- **Default timeout:** 60 seconds (configurable via `SHUTDOWN_TIMEOUT` environment variable)
+- **Behavior:** When you stop the server (Ctrl+C or SIGTERM):
+  1. Server logs: `"Shutdown initiated by signal SIGINT/SIGTERM. Allowing up to X seconds for graceful shutdown."`
+  2. Ongoing requests are allowed to complete within the timeout period
+  3. Server cleans up resources and terminates gracefully
+  4. If shutdown doesn't complete within the timeout, server forces exit
+
+**Stopping the server:**
+```bash
+# Press Ctrl+C in the terminal where server is running
+# Or send SIGTERM signal:
+kill -TERM $(pgrep -f "python.*server.py")
+```
+
+**Note:** When using `reload=True` (development mode), the graceful shutdown may behave differently as uvicorn's reloader runs the server in a child process.
 
 ## 🧪 Testing
 

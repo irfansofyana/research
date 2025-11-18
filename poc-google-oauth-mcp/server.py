@@ -12,8 +12,12 @@ Flow:
 
 import os
 import secrets
+import signal
+import sys
+import threading
+import logging
 import time
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
@@ -46,6 +50,28 @@ prefs_store: dict[str, dict[str, Any]] = {}
 
 # Setup templates
 templates = Jinja2Templates(directory="templates")
+
+
+# ============================================================================
+# Graceful Shutdown Utilities
+# ============================================================================
+
+def get_shutdown_timeout() -> float:
+    """Get the shutdown timeout from environment with default of 60 seconds."""
+    default = 60.0
+    try:
+        return float(os.getenv("SHUTDOWN_TIMEOUT", default))
+    except Exception:
+        return default
+
+
+def cleanup_resources():
+    """Cleanup resources before shutdown. Extend this for DB connections, etc."""
+    try:
+        # TODO: close DB pools, stop background threads, flush telemetry, etc.
+        pass
+    except Exception as exc:
+        logging.getLogger("server").exception("Error during cleanup: %s", exc)
 
 
 # ============================================================================
@@ -445,8 +471,19 @@ app = Starlette(routes=routes, lifespan=mcp_app.lifespan)
 # Server Entry Point
 # ============================================================================
 
-if __name__ == "__main__":
+def main():
+    """Main entry point with graceful shutdown handling."""
     import uvicorn
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger("server")
+    
+    timeout = get_shutdown_timeout()
+    logger.info(f"Graceful shutdown timeout: {timeout}s")
     
     print(f"Starting Google OAuth MCP Server")
     print(f"Server: http://localhost:{PORT}")
@@ -455,6 +492,93 @@ if __name__ == "__main__":
     print()
     print("Configure your MCP client with:")
     print(f"  URL: http://localhost:{PORT}/mcp/")
+    print(f"Graceful shutdown timeout: {timeout}s")
     print()
     
-    uvicorn.run("server:app", host="0.0.0.0", port=PORT, reload=True)
+    # Build uvicorn config with graceful shutdown timeout
+    config = uvicorn.Config(
+        "server:app",
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info",
+        timeout_graceful_shutdown=timeout,
+        reload=True,
+    )
+    
+    server = uvicorn.Server(config)
+    
+    # Override signal handlers to add force-exit timer
+    shutdown_started = threading.Event()
+    force_timer: Optional[threading.Timer] = None
+    
+    def _force_exit():
+        """Force exit if graceful shutdown takes too long."""
+        try:
+            logger.error(
+                "Graceful shutdown did not complete within %.1f seconds. Forcing exit.",
+                timeout
+            )
+            cleanup_resources()
+            # Flush IO before hard-exit
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+        finally:
+            os._exit(1)  # hard exit as last resort
+    
+    def _handle_signal(signum, frame):
+        """Handle shutdown signals with timeout enforcement."""
+        nonlocal force_timer
+        sig_name = None
+        try:
+            sig_name = signal.Signals(signum).name
+        except Exception:
+            sig_name = str(signum)
+        
+        if not shutdown_started.is_set():
+            shutdown_started.set()
+            logger.info(
+                "Shutdown initiated by signal %s. Allowing up to %.1f seconds for graceful shutdown.",
+                sig_name,
+                timeout
+            )
+            
+            # Ask uvicorn to begin graceful shutdown
+            try:
+                if hasattr(server, "handle_exit"):
+                    server.handle_exit(signum, frame)
+                else:
+                    server.should_exit = True
+            except Exception:
+                server.should_exit = True
+            
+            # Start the force-exit timer
+            force_timer = threading.Timer(timeout, _force_exit)
+            force_timer.daemon = True
+            force_timer.start()
+        else:
+            logger.warning("Second shutdown signal received; forcing immediate exit.")
+            _force_exit()
+    
+    # Install custom signal handlers directly
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    
+    try:
+        server.run()
+    finally:
+        # If we shut down cleanly within the timeout, cancel the force timer
+        if force_timer is not None:
+            try:
+                force_timer.cancel()
+            except Exception:
+                pass
+        # Final cleanup hook (best effort)
+        cleanup_resources()
+        logger.info("Server shutdown complete.")
+
+
+if __name__ == "__main__":
+    main()
