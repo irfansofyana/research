@@ -78,6 +78,8 @@ for project in projects:
 ## [example-research-project](example-research-project)
 _2025-11-19_
 
+Just example Project
+
 This is an example research project created to test the auto-update README functionality.
 It demonstrates how the system picks up new folders and adds them to the list.
 
